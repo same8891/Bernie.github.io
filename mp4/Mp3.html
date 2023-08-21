@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>CS 418 MP3</title>
+    <script src="scene-option-tree.js"></script><!-- handles controls -->
+    <script src="math.js"></script>
+
+<!-- The source code of a vertex shader directly in the HTML. use move and view matric to compute the final position. Use max_z and min_z to compute the rate of height in total height. -->
+<script id="vert" type="glsl">
+    #version 300 es
+    in vec4 position;
+    in vec3 normal;
+    out vec3 fnormal;
+    out float height[1];
+    uniform mat4 p;
+    uniform mat4 mv;
+    uniform float max_z[1];
+    uniform float min_z[1];
+    uniform float mode[1];
+    out float modes[1];
+    void main() {
+        float max = max_z[0], min = min_z[0];
+        gl_Position = p * mv * position;
+        fnormal = mat3(mv) * normal;
+        if(mode[0] == 1.0)
+        {
+            if(position.z >= (max-min)/3.0*2.0 + min)
+                height[0] = (position.z - (max-min)/3.0*2.0 - min ) / ((max-min)/3.0);
+            else
+                height[0] = (position.z - (max-min)/3.0*2.0 - min ) / ((max-min)/3.0*2.0);
+        }
+        else
+            height[0] = 0.0;
+        modes[0] = mode[0];
+    }
+    </script>
+    
+    
+    <!-- The source code of a fragment shader. which use diffuse light, option of shiny and use height to build Height-based color ramp-->
+    <script id="frag" type="glsl">
+    #version 300 es
+    precision highp float;
+    uniform vec4 color;
+    uniform vec3 lcolor;
+    uniform vec3 lightdir;
+    out vec4 fragColor;
+    uniform vec3 halfway;
+    in vec3 fnormal;
+    in float height[1];
+    in float modes[1];
+    void main() {
+        vec3 n = normalize(fnormal);
+        float lambert = max(dot(lightdir, n), 0.0);
+        float blinn = pow(max(dot(halfway, n), 0.0), 50.0);
+        if(modes[0] > 0.9)
+        {
+            if(height[0] <= 0.0)
+                fragColor = vec4( (-height[0]) * (lcolor[0] * lambert)+ (lcolor[0]*blinn)*10.0,(1.0+height[0]) * (lcolor[0] * lambert)+ (lcolor[1]*blinn)*10.0,0, 1.0);
+            else
+                fragColor = vec4(0.0,(1.0-height[0]) * (lcolor[1] * lambert)+ (lcolor[1]*blinn)*10.0, height[0] * (lcolor[2] * lambert)+ (lcolor[2]*blinn)*10.0, 1.0);
+        }
+        else
+        {
+            fragColor = vec4(color.rgb * (lcolor * lambert)+ (lcolor*blinn)*10.0, color.a);
+        }
+    }
+    </script>
+    
+    
+    <!-- Code I don't expect to change. -->
+    <script>
+    const IlliniBlue = new Float32Array([0.075, 0.16, 0.292, 1])
+    const IdentityMatrix = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
+    /** the empty grid*/
+    var empty_terrian =
+        {"triangles":
+            []
+        ,"attributes":
+            {"position":
+                []
+            ,"normal":
+                []
+        }
+    }
+    /** the empty sphere*/
+    var sphere =
+        {"triangles":
+            []
+        ,"attributes":
+            {"position":
+                []
+            ,"normal":
+                []
+        }
+    }
+    /**
+     * Given the source code of a vertex and fragment shader, compiles them,
+     * and returns the linked program.
+     */
+    function compileAndLinkGLSL(vs_source, fs_source) {
+        let vs = gl.createShader(gl.VERTEX_SHADER)
+        gl.shaderSource(vs, vs_source)
+        gl.compileShader(vs)
+        if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+            console.error(gl.getShaderInfoLog(vs))
+            throw Error("Vertex shader compilation failed")
+        }
+    
+        let fs = gl.createShader(gl.FRAGMENT_SHADER)
+        gl.shaderSource(fs, fs_source)
+        gl.compileShader(fs)
+        if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+            console.error(gl.getShaderInfoLog(fs))
+            throw Error("Fragment shader compilation failed")
+        }
+    
+        let program = gl.createProgram()
+        gl.attachShader(program, vs)
+        gl.attachShader(program, fs)
+        gl.linkProgram(program)
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            console.error(gl.getProgramInfoLog(program))
+            throw Error("Linking failed")
+        }
+        
+        return program
+    }
+    /**
+ * Sends per-vertex data to the GPU and connects it to a VS input
+ * 
+ * @param data    a 2D array of per-vertex data (e.g. [[x,y,z,w],[x,y,z,w],...])
+ * @param program a compiled and linked GLSL program
+ * @param vsIn    the name of the vertex shader's `in` attribute
+ * @param mode    (optional) gl.STATIC_DRAW, gl.DYNAMIC_DRAW, etc
+ * 
+ * @returns the ID of the buffer in GPU memory; useful for changing data later
+ */
+function supplyDataBuffer(data, program, vsIn, mode) {
+    if (mode === undefined) mode = gl.STATIC_DRAW
+    
+    let buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    let f32 = new Float32Array(data.flat())
+    gl.bufferData(gl.ARRAY_BUFFER, f32, mode)
+    
+    let loc = gl.getAttribLocation(program, vsIn)
+    gl.vertexAttribPointer(loc, data[0].length, gl.FLOAT, false, 0, 0)
+    gl.enableVertexAttribArray(loc)
+    
+    return buf;
+}
+
+/**
+ * Creates a Vertex Array Object and puts into it all of the data in the given
+ * JSON structure, which should have the following form:
+ * 
+ * ````
+ * {"triangles": a list of of indices of vertices
+ * ,"attributes":
+ *  {name_of_vs_input_1: a list of 1-, 2-, 3-, or 4-vectors, one per vertex
+ *  ,name_of_vs_input_2: a list of 1-, 2-, 3-, or 4-vectors, one per vertex
+ *  }
+ * }
+ * ````
+ * 
+ * @returns an object with four keys:
+ *  - mode = the 1st argument for gl.drawElements
+ *  - count = the 2nd argument for gl.drawElements
+ *  - type = the 3rd argument for gl.drawElements
+ *  - vao = the vertex array object for use with gl.bindVertexArray
+ */
+function setupGeomery(geom) {
+    var triangleArray = gl.createVertexArray()
+    gl.bindVertexArray(triangleArray)
+
+    for(let name in geom.attributes) {
+        let data = geom.attributes[name]
+        supplyDataBuffer(data, program, name)
+    }
+
+    var indices = new Uint16Array(geom.triangles.flat())
+    var indexBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+
+    return {
+        mode: gl.TRIANGLES,
+        count: indices.length,
+        type: gl.UNSIGNED_SHORT,
+        vao: triangleArray
+    }
+}
+</script>
+
+<!-- All the other code in one big script element. -->
+<script>
+
+
+
+/** Resizes the canvas to completely fill the screen */
+function fillScreen() {
+    let canvas = document.querySelector('canvas')
+    document.body.style.margin = '0'
+    canvas.style.width = '100vw'
+    canvas.style.height = '100vh'
+    canvas.width = canvas.clientWidth
+    canvas.height = canvas.clientHeight
+    canvas.style.width = ''
+    canvas.style.height = ''
+    if (window.gl) {
+        gl.viewport(0,0, canvas.width, canvas.height)
+        window.p = m4perspNegZ(0.1, 10, 1, canvas.width, canvas.height)
+    }
+}
+/** Compute the gird normal*/
+function addNormals() {
+    grid.attributes.normal = []
+    for(let i=0; i<grid.attributes.position.length; i+=1) {
+        grid.attributes.normal.push([0,0,0])
+    }
+    for(let i=0; i<grid.triangles.length; i+=1) {
+        let tri = grid.triangles[i]
+        let p0 = grid.attributes.position[tri[0]]
+        let p1 = grid.attributes.position[tri[1]]
+        let p2 = grid.attributes.position[tri[2]]
+        let e1 = sub(p1,p0)
+        let e2 = sub(p2,p0)
+        let n = cross(e1,e2)
+        grid.attributes.normal[tri[0]] = add(grid.attributes.normal[tri[0]], n)
+        grid.attributes.normal[tri[1]] = add(grid.attributes.normal[tri[1]], n)
+        grid.attributes.normal[tri[2]] = add(grid.attributes.normal[tri[2]], n)
+    }
+    for(let i=0; i<grid.attributes.position.length; i+=1) {
+        grid.attributes.normal[i] = normalize(grid.attributes.normal[i] )
+    }
+    
+}
+
+</script>
+<script>// configures controls
+/**
+ * Modify this object to chose what options you want in the control pane.
+ * Top-level entries become top-section radio buttons.
+ * Nested entries become lower-section inputs of various types.
+ */
+var controlOptions =
+  {"terrain":
+  {"label":"Required: Terrain"
+    ,"options":
+      {"resolution":{"type":"number","default":100,"label":"Grid size"}
+      ,"slices":{"type":"number","default":100,"label":"Fractures"}
+      ,"Shiny":{"type":"checkbox","default":false,"label":"Shiny"}
+      ,"heightbased":{"type":"checkbox","default":false,"label":"Height-based color ramp"}
+      ,"erode":
+        {"type":"radio"
+        ,"options":
+          {"rough":"No Weathering"
+          ,"spheroid":"Spheroidal Weathering"
+          }
+        }
+        ,"sphero_iterate_time":{"type":"number","default":50,"label":" sphero iterate time"}
+      }
+    }
+    ,"sphere":
+    {"label":"Optional: UV-sphere"
+    ,"options":
+      {"rings":{"type":"number","default":3,"label":"latitude rings"}
+      ,"l_slices":{"type":"number","default":4,"label":"longitude slices"}
+      
+      }
+    }
+  }
+
+/** Compute any time-varying or animated aspects of the scene , when the grid size is bigger than it will more close to grid horizon
+ * Because my grid diameter is fixed so I set that if the grid size is smaller than it will closer to terrian 
+*/
+function timeStep(milliseconds) {
+    let seconds = milliseconds / 1000;
+
+    window.m = m4mul(m4rotX(-Math.PI/2))
+    window.v = m4view([3,0.6,0.1], [0,0.6,0.1], [0,1,0])
+
+    draw()
+    requestAnimationFrame(timeStep)
+}
+
+
+/**
+ * Draw one frame and pass parameter to vertex shader and fragment shader
+ */
+ function draw() {
+    gl.clearColor(...IlliniBlue) // f(...[1,2,3]) means f(1,2,3)
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+    gl.useProgram(program)
+    window.modes = 0.0
+    gl.bindVertexArray(geom.vao)
+    window.halfway = [0,0,0]
+    gl.uniform3fv(gl.getUniformLocation(program, 'lightdir'), normalize([1,1,1]))
+    if(shiny == true)
+    {
+        halfway = normalize(add([-2,0,1], [0,0,1]))
+    }
+    if(height_based == true)
+    {
+        gl.uniform1f(gl.getUniformLocation(program, 'max_z'), [window.max_z])
+        gl.uniform1f(gl.getUniformLocation(program, 'min_z'), [window.min_z])
+        window.modes = 1.0
+    }
+    gl.uniform1f(gl.getUniformLocation(program, 'mode'), [window.modes])
+    if(mode == "terrain")
+    {
+        gl.uniform4fv(gl.getUniformLocation(program, 'color'), [0.5,0.5,0,1])
+    }
+    else
+    {
+        gl.uniform4fv(gl.getUniformLocation(program, 'color'), [0.5,0.5,0,1])
+    }
+    gl.uniform3fv(gl.getUniformLocation(program, 'lcolor'), [1,1,1])
+    gl.uniform3fv(gl.getUniformLocation(program, 'halfway'), halfway)
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mul(v,m))
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+    gl.drawElements(geom.mode, geom.count, geom.type, 0)
+
+}
+/** Compute the grid positions and triangles. Set gridsize x,y=-1.0 to x,y = 1.0, and use grid size to compute the position.*/
+function setgrid(){
+    grid.attributes.position = []
+    grid.triangles = []
+    for(let i = 0; i < gridsize; i++)
+        for(let j = 0; j < gridsize; j++)
+        {
+            grid.attributes.position.push([-1.0+j*2.0/(gridsize-1),-1.0+i*2.0/(gridsize-1),0])
+        }
+    for(let i = 0; i < gridsize-1; i++)
+        for(let j = 0; j < gridsize-1; j++)
+        {
+            grid.triangles.push([i*gridsize+j,i*gridsize+j+1,i*gridsize+j+gridsize])
+            grid.triangles.push([i*gridsize+j+1,i*gridsize+j+gridsize+1,i*gridsize+j+gridsize])
+        }
+}
+/**compute the sphere position, triangle and normal
+ *  Use sphere raidus and rings height to compute ring radius. And use ring radius to compute ring position
+ *  use the way that generate grid triangle to generate sphere triangle and use the ring final position, ring true position to let the picture fit 
+ * the way generate normal is same as generate grid normal. 
+ */ 
+function setsphere(){
+    sphere.attributes.position = []
+    sphere.triangles = []
+    sphere.attributes.position.push([0,0,0.5])
+    let count = Math.floor((ring - 2)/2)
+    let mid = (ring - 2) % 2 
+    let h = 0.5 / (count+1)
+    for(let i = 1; i <= count ; i++)
+    {
+        let r = Math.sqrt(0.25 - Math.pow(0.5 - i * h,2))
+        for (let j = 0; j < sl; j++)
+        {
+            sphere.attributes.position.push([r*Math.cos(j*360/sl* (Math.PI / 180)),r*Math.sin(j*360/sl* (Math.PI / 180)),0.5 - i * h])
+        }
+    }
+    if(mid == 1)
+    {
+        for (let j = 0; j < sl; j++)
+        {
+            sphere.attributes.position.push([0.5*Math.cos(j*360/sl* (Math.PI / 180)),0.5*Math.sin(j*360/sl* (Math.PI / 180)),0])
+        }
+    }
+    for(let i = 1; i <= count ; i++)
+    {
+        let r = Math.sqrt(0.25 - Math.pow(- i * h,2))
+        for (let j = 0; j < sl; j++)
+        {
+            sphere.attributes.position.push([r*Math.cos(j*360/sl* (Math.PI / 180)),r*Math.sin(j*360/sl* (Math.PI / 180)),- i * h])
+        }
+    }
+    sphere.attributes.position.push([0,0,-0.5])
+    for (let j = 1; j < sl; j++)
+    {
+        //sphere.triangles.push([0,j+1,j])
+        sphere.triangles.push([0,j,j+1])
+    }
+    sphere.triangles.push([0,sl,1])
+    for(let i = 0; i < ring-3; i++)
+    {
+        for (let j = 0; j < sl-1; j++)
+        {
+            sphere.triangles.push([1+i*sl+j,i*sl+j+sl+1,i*sl+j+2])
+            sphere.triangles.push([1+i*sl+j+1,1+i*sl+j+sl,i*sl+j+sl+2])
+        }
+        sphere.triangles.push([1+i*sl+(sl-1),i*sl+(sl-1)+sl+1,i*sl+1])
+        sphere.triangles.push([i*sl+1,i*sl+1+sl,i*sl+(sl-1)+sl+1])
+    }
+    for (let j = 1; j < sl; j++)
+    {
+        sphere.triangles.push([sl*(ring-3)+j,sphere.attributes.position.length-1,sl*(ring-3)+j+1])
+    }
+    sphere.triangles.push([sl*(ring-3)+(sl),sphere.attributes.position.length-1,sl*(ring-3)+1])
+    sphere.attributes.normal = []
+    for(let i=0; i<sphere.attributes.position.length; i+=1) {
+        sphere.attributes.normal.push([0,0,0])
+    }
+    for(let i=0; i<sphere.triangles.length; i+=1) {
+        let tri = sphere.triangles[i]
+        let p0 = sphere.attributes.position[tri[0]]
+        let p1 = sphere.attributes.position[tri[1]]
+        let p2 = sphere.attributes.position[tri[2]]
+        let e1 = sub(p1,p0)
+        let e2 = sub(p2,p0)
+        let n = cross(e1,e2)
+        sphere.attributes.normal[tri[0]] = add(sphere.attributes.normal[tri[0]], n)
+        sphere.attributes.normal[tri[1]] = add(sphere.attributes.normal[tri[1]], n)
+        sphere.attributes.normal[tri[2]] = add(sphere.attributes.normal[tri[2]], n)
+    }
+    for(let i=0; i<sphere.attributes.position.length; i+=1) {
+        sphere.attributes.normal[i] = normalize(sphere.attributes.normal[i] )
+    }
+}
+/**
+ * Resizes the canvas to completely fill the screen
+ */
+function fillScreen() {
+    let canvas = document.querySelector('canvas')
+    document.body.style.margin = '0'
+    canvas.style.width = '100%'
+    canvas.style.height = '100%'
+    canvas.width = canvas.clientWidth
+    canvas.height = canvas.clientHeight
+    canvas.style.width = ''
+    canvas.style.height = ''
+    // to do: update aspect ratio of projection matrix here
+    if (window.gl) {
+        gl.viewport(0,0, canvas.width, canvas.height)
+        window.p = m4perspNegZ(0.1, 10, 1, canvas.width, canvas.height)
+        requestAnimationFrame(timeStep)
+    }
+}
+/**choose a point p and n which are random generate and point from grid to do faulting if the dot(sub(b,p),n) is >=0 then let z increase, else let z decrease.
+ * After finish faulting use max_z, min_z, max_x, min_x to do vertical separation which the highest to lowest point are 1/3 times as large as the horizontal separation of points
+*/
+function faulting() {
+    for(let i = 0; i < Fractures; i++)
+    {
+        //pick random point
+        let x = Math.random()*2-1
+        let y = Math.random()*2-1
+        let p = [x, y]
+        let theta =  Math.random()*2
+        let n = [Math.cos(Math.PI*theta),Math.sin(Math.PI*theta),0]
+        for(let j = 0; j < gridsize*gridsize; j++)
+        {
+            let b = [grid.attributes.position[j][0],grid.attributes.position[j][1]]
+            if(dot(sub(b,p),n) >= 0.0)
+            {
+                grid.attributes.position[j][2] = grid.attributes.position[j][2] + 0.01
+            }
+            else
+            {
+                grid.attributes.position[j][2] = grid.attributes.position[j][2] - 0.01
+            }
+        }
+
+    }
+    if(Fractures > 0)
+    {
+        let min_x = 2.0, max_x = -2.0 
+        window.min_z = 4.0 
+        window.max_z = -4.0
+        for(let j = 0; j < gridsize*gridsize; j++)
+        {
+            if(grid.attributes.position[j][0]>max_x)
+                max_x = grid.attributes.position[j][0]
+            if(grid.attributes.position[j][0]<min_x)
+                min_x = grid.attributes.position[j][0]
+            if(grid.attributes.position[j][2]>max_z)
+                max_z = grid.attributes.position[j][2]
+            if(grid.attributes.position[j][2]<min_z)
+                min_z = grid.attributes.position[j][2]
+        }
+        let h = (max_x-min_x) * 1/3
+        if(h != 0.0)
+        {
+            for(let j = 0; j < gridsize*gridsize; j++)
+            {
+                grid.attributes.position[j][2] = (grid.attributes.position[j][2] - min_z) / (max_z-min_z)*h - h/2
+            }
+        }
+        for(let j = 0; j < gridsize*gridsize; j++)
+        {
+            if(grid.attributes.position[j][2]>max_z)
+                max_z = grid.attributes.position[j][2]
+            if(grid.attributes.position[j][2]<min_z)
+                min_z = grid.attributes.position[j][2]
+        }
+    }
+}
+
+/** Based on old grid, compute the point z coordinate average of the point neighbors and update the new z coordinate base on 0.98 * old + 0.02 * average*/
+function sphero() {
+    let tmp_grid = grid
+    let average = 0.0
+    for(let i = 0;i <times;i++)
+    {
+
+        for(let j = 0; j < gridsize; j++)
+        {
+            for(let k = 0; k < gridsize; k++)
+            {
+                if(j==0 && k==0)
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k+1][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize+1][2])/3
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                else if(j==0 && k==gridsize-1)
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k-1][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize-1][2])/3
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                else if(j==gridsize-1 && k==gridsize-1)
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k-1][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize-1][2])/3
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                else if(j==gridsize-1 && k==0)
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k+1][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize+1][2])/3
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                else if(j==0)
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k-1][2] + tmp_grid.attributes.position[j*gridsize+k+1][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize+1][2]+tmp_grid.attributes.position[j*gridsize+k+gridsize-1][2])/5
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                else if(j==gridsize-1)
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k-1][2] + tmp_grid.attributes.position[j*gridsize+k+1][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize+1][2]+tmp_grid.attributes.position[j*gridsize+k-gridsize-1][2])/5
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                else if(k==0)
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k+1][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize+1][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize+1][2])/5
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                else if(k==gridsize-1)
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k-1][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize-1][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize-1][2])/5
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                else
+                {
+                    average = (tmp_grid.attributes.position[j*gridsize+k+1][2] + tmp_grid.attributes.position[j*gridsize+k-1][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize-1][2] + tmp_grid.attributes.position[j*gridsize+k-gridsize+1][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize-1][2] + tmp_grid.attributes.position[j*gridsize+k+gridsize+1][2])/8
+                    let sharp = Math.abs(average - tmp_grid.attributes.position[j*gridsize+k][2])
+                    grid.attributes.position[j*gridsize+k][2] = 0.98*grid.attributes.position[j*gridsize+k][2] + average * 0.02
+                }
+                
+            }
+        }
+    }
+}
+/**
+ * set the variable , Generate geometry, render the scene
+ */
+async function setupScene(scene, options) {
+    console.log("To do: render",scene,"with options",options)
+    mode = scene
+    window.gridsize = options.resolution
+    window.Fractures = options.slices
+
+}
+/** Compile, link, set up geometry and initialize variable*/
+async function setup(event) {
+    window.gl = document.querySelector('canvas').getContext('webgl2',
+        // optional configuration object: see https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/getContext
+        {antialias: false, depth:true, preserveDrawingBuffer:true}
+    )
+    let vs = document.querySelector('#vert').textContent.trim()
+    let fs = document.querySelector('#frag').textContent.trim()
+    window.mode = 'terrain'
+    window.shiny = false
+    window.height_based = false
+    window.program = compileAndLinkGLSL(vs,fs)
+    gl.enable(gl.DEPTH_TEST)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    window.gridsize = 100
+    window.Fractures = 100
+    window.grid = empty_terrian
+    window.modes = 0.0
+    window.erode = "No"
+    setgrid()
+    faulting()
+    addNormals()
+    window.geom = setupGeomery(grid)
+    fillScreen()
+    window.addEventListener('resize', fillScreen)
+    window.ring = 0
+    window.sl = 0
+    requestAnimationFrame(timeStep)
+}
+window.addEventListener('load', setup)
+window.addEventListener('resize', fillScreen)
+</script>
+
+
+
+<!-- DO NOT MODIFY anything below this line -->
+<style>
+    body { margin: 0; border: none; padding: 0; display: flex; }
+    .controls {
+        width: min(50%, 20em); padding: 1em;
+        flex: 0 0 min(50%, 20em);
+    }
+    .controls label { display: block; }
+    .display {
+        flex-grow: 1; height: 100vh;
+        line-height: 0rem;
+    }
+</style>
+</head>
+<body>
+    <div class="controls">
+        <form>
+        <div id="set1"></div>
+        <hr/>
+        <div id="set2"></div>
+        <hr/>
+        <input type="submit" value="Generate object"/>
+        </form>
+    </div>
+    <div class="display"><canvas width="500" height="500"></canvas></div>
+</body>
+</html>

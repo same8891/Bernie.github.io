@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>CS 418 MP4</title>
+    <script src="math.js"></script>
+
+<!-- The source code of a vertex shader directly in the HTML. use move and view matric to compute the final position. Use max_z and min_z to compute the rate of height in total height. -->
+<!-- The first vertex shader is for object file that don't have color and terrian-->
+    <script id="vert" type="glsl">
+    #version 300 es
+    in vec4 position;
+    in vec3 normal;
+    in vec2 aTexCoord;
+    out vec2 vTexCoord;
+    out vec3 fnormal;
+    uniform mat4 p;
+    uniform mat4 mv;
+    void main() {
+        gl_Position = p * mv * position;
+        fnormal = mat3(mv) * normal;
+        vTexCoord = aTexCoord;
+    }
+    </script>
+<!-- The second vertex shader is for object file that have color and terrian-->
+    <script id="vert2" type="glsl">
+    #version 300 es
+    in vec4 position;
+    in vec3 normal;
+    in vec3 objcolor;
+    out vec3 fobjcolor;
+    uniform mat4 p;
+    uniform mat4 mv;
+    out vec3 fnormal;
+    void main() {
+        gl_Position = p * mv * position;
+        fnormal = mat3(mv) * normal;
+        fobjcolor = objcolor;
+    }
+    </script>
+<!-- The source code of a fragment shader. which use diffuse light, option of shiny and use height to build Height-based color ramp-->
+<!-- The first fragment shader is for object file that don't have color and terrian-->
+    <script id="frag" type="glsl">
+    #version 300 es
+    precision highp float;
+    uniform vec4 color;
+    uniform sampler2D image;
+    in vec2 vTexCoord;
+    uniform vec3 lcolor;
+    uniform vec3 lightdir;
+    out vec4 fragColor;
+    in vec3 fnormal;
+    void main() {
+        vec3 n = normalize(fnormal);
+        float lambert = max(dot(lightdir, n), 0.0);
+        vec4 lookedUpRGBA = texture(image, vTexCoord);
+        fragColor = vec4(lookedUpRGBA.rgb * (lcolor * lambert), lookedUpRGBA.a);
+
+    }
+    </script>
+<!-- The second fragment shader is for object file that have color and terrian-->
+    <script id="frag2" type="glsl">
+    #version 300 es
+    precision highp float;
+    in vec3 fobjcolor;
+    uniform vec3 lcolor;
+    uniform vec3 lightdir;
+    in vec3 fnormal;
+    out vec4 fragColor;
+    void main() {
+        fragColor = vec4(fobjcolor.rgb, 1);
+
+    }
+    </script>
+    
+    <!-- Code I don't expect to change. -->
+    <script>
+        //fragColor = vec4(color.rgb * (lcolor * lambert), color.a);
+    const IlliniBlue = new Float32Array([0.075, 0.16, 0.292, 1])
+    const IdentityMatrix = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
+    /** the empty grid*/
+    var empty_terrian =
+        {"triangles":
+            []
+        ,"attributes":
+            {"position":
+                []
+            ,"normal":
+                []
+        }
+    }
+    var obj_file =
+        {"triangles":
+            []
+        ,"attributes":
+            {"position":
+                []
+            ,"normal":
+                []
+        }
+    } 
+    /**
+     * Given the source code of a vertex and fragment shader, compiles them,
+     * and returns the linked program.
+     */
+    function compileAndLinkGLSL(vs_source, fs_source) {
+        let vs = gl.createShader(gl.VERTEX_SHADER)
+        gl.shaderSource(vs, vs_source)
+        gl.compileShader(vs)
+        if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+            console.error(gl.getShaderInfoLog(vs))
+            throw Error("Vertex shader compilation failed")
+        }
+    
+        let fs = gl.createShader(gl.FRAGMENT_SHADER)
+        gl.shaderSource(fs, fs_source)
+        gl.compileShader(fs)
+        if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+            console.error(gl.getShaderInfoLog(fs))
+            throw Error("Fragment shader compilation failed")
+        }
+    
+        let program = gl.createProgram()
+        gl.attachShader(program, vs)
+        gl.attachShader(program, fs)
+        gl.linkProgram(program)
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            console.error(gl.getProgramInfoLog(program))
+            throw Error("Linking failed")
+        }
+        
+        let slot = 0; // or a larger integer if this isn't the only texture
+        window.texture = gl.createTexture();
+        gl.activeTexture(gl.TEXTURE0 + slot);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR );
+        // lets you use a mipmapping min filter
+        
+        return program
+    }
+    /**
+ * Sends per-vertex data to the GPU and connects it to a VS input
+ * 
+ * @param data    a 2D array of per-vertex data (e.g. [[x,y,z,w],[x,y,z,w],...])
+ * @param program a compiled and linked GLSL program
+ * @param vsIn    the name of the vertex shader's `in` attribute
+ * @param mode    (optional) gl.STATIC_DRAW, gl.DYNAMIC_DRAW, etc
+ * 
+ * @returns the ID of the buffer in GPU memory; useful for changing data later
+ */
+function supplyDataBuffer(data, program, vsIn, mode) {
+    if (mode === undefined) mode = gl.STATIC_DRAW
+    
+    let buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    let f32 = new Float32Array(data.flat())
+    gl.bufferData(gl.ARRAY_BUFFER, f32, mode)
+
+    
+    let loc = gl.getAttribLocation(program, vsIn)
+    gl.vertexAttribPointer(loc, data[0].length, gl.FLOAT, false, 0, 0)
+    gl.enableVertexAttribArray(loc)
+    
+    return buf;
+}
+
+/**
+ * Creates a Vertex Array Object and puts into it all of the data in the given
+ * JSON structure, which should have the following form:
+ * 
+ * ````
+ * {"triangles": a list of of indices of vertices
+ * ,"attributes":
+ *  {name_of_vs_input_1: a list of 1-, 2-, 3-, or 4-vectors, one per vertex
+ *  ,name_of_vs_input_2: a list of 1-, 2-, 3-, or 4-vectors, one per vertex
+ *  }
+ * }
+ * ````
+ * 
+ * @returns an object with four keys:
+ *  - mode = the 1st argument for gl.drawElements
+ *  - count = the 2nd argument for gl.drawElements
+ *  - type = the 3rd argument for gl.drawElements
+ *  - vao = the vertex array object for use with gl.bindVertexArray
+ */
+function setupGeomery(program,geom) {
+    var triangleArray = gl.createVertexArray()
+    gl.bindVertexArray(triangleArray)
+
+    for(let name in geom.attributes) {
+        let data = geom.attributes[name]
+        supplyDataBuffer(data, program, name)
+    }
+
+    var indices = new Uint16Array(geom.triangles.flat())
+    var indexBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+
+    return {
+        mode: gl.TRIANGLES,
+        count: indices.length,
+        type: gl.UNSIGNED_SHORT,
+        vao: triangleArray
+    }
+}
+</script>
+
+<!-- All the other code in one big script element. -->
+<script>
+
+
+
+/** Resizes the canvas to completely fill the screen */
+function fillScreen() {
+    let canvas = document.querySelector('canvas')
+    document.body.style.margin = '0'
+    canvas.style.width = '100vw'
+    canvas.style.height = '100vh'
+    canvas.width = canvas.clientWidth
+    canvas.height = canvas.clientHeight
+    canvas.style.width = ''
+    canvas.style.height = ''
+    if (window.gl) {
+        gl.viewport(0,0, canvas.width, canvas.height)
+        window.p = m4perspNegZ(0.1, 10, 1, canvas.width, canvas.height)
+    }
+}
+/** Compute the gird normal*/
+function addNormals() {
+    grid.attributes.normal = []
+    for(let i=0; i<grid.attributes.position.length; i+=1) {
+        grid.attributes.normal.push([0,0,0])
+    }
+    for(let i=0; i<grid.triangles.length; i+=1) {
+        let tri = grid.triangles[i]
+        let p0 = grid.attributes.position[tri[0]]
+        let p1 = grid.attributes.position[tri[1]]
+        let p2 = grid.attributes.position[tri[2]]
+        let e1 = sub(p1,p0)
+        let e2 = sub(p2,p0)
+        let n = cross(e1,e2)
+        grid.attributes.normal[tri[0]] = add(grid.attributes.normal[tri[0]], n)
+        grid.attributes.normal[tri[1]] = add(grid.attributes.normal[tri[1]], n)
+        grid.attributes.normal[tri[2]] = add(grid.attributes.normal[tri[2]], n)
+    }
+    for(let i=0; i<grid.attributes.position.length; i+=1) {
+        grid.attributes.normal[i] = normalize(grid.attributes.normal[i] )
+    }
+    
+}
+
+</script>
+<script>// configures controls
+
+/** Compute any time-varying or animated aspects of the scene 
+ * set the parmeter which will make camera move and rotate, 
+ * let camera move and rotate by the parameter that change by key down 
+*/
+function timeStep(milliseconds) {
+    let seconds = milliseconds / 1000;
+    if (keysBeingPressed['w'] == true) {
+    if(fmode == 1){
+        vir = vir - 0.01*Math.cos(2*Math.PI*rvir/360)*Math.cos(2*Math.PI*rhor/360)
+        hor = hor + 0.01*Math.cos(2*Math.PI*rvir/360)*Math.sin(2*Math.PI*rhor/360)
+        hei = hei + 0.01*Math.sin(2*Math.PI*rvir/360)
+    }
+    else
+    {
+        let vir_new = vir - 2/(gridsize)/20*Math.cos(2*Math.PI*rhor/360)*Math.cos(2*Math.PI*rvir/360)/Math.abs(Math.cos(2*Math.PI*rvir/360))
+        let hor_new = hor + 2/(gridsize)/20*Math.sin(2*Math.PI*rhor/360)*Math.cos(2*Math.PI*rvir/360)/Math.abs(Math.cos(2*Math.PI*rvir/360))
+        if(vir_new<0.99 && vir_new > -0.99 && -hor_new<0.99 && -hor_new > -0.99)
+        {
+            a = (vir_new - grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][0])/(2/(gridsize-1))
+            b = (-hor_new - grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][1])/(2/(gridsize-1))
+            vir = vir_new
+            hor = hor_new
+            hei = grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][2] * (1-a)*(1-b) + grid.attributes.position[Math.ceil(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][2]*b*(1-a) + grid.attributes.position[Math.ceil(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir_new+1)/2*(gridsize-1))][2]*b*(a)+ grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir_new+1)/2*(gridsize-1))][2]*a*(1-b) + 4/(gridsize)
+        }
+    }
+  }
+  if (keysBeingPressed['s'] == true) {
+    if(fmode == 1){
+        vir = vir + 0.01*Math.cos(2*Math.PI*rvir/360)*Math.cos(2*Math.PI*rhor/360)
+        hor = hor - 0.01*Math.cos(2*Math.PI*rvir/360)*Math.sin(2*Math.PI*rhor/360)
+        hei = hei - 0.01*Math.sin(2*Math.PI*rvir/360)
+    }
+    else
+    {
+        let vir_new = vir + 2/(gridsize-1)/20*Math.cos(2*Math.PI*rhor/360)*Math.cos(2*Math.PI*rvir/360)/Math.abs(Math.cos(2*Math.PI*rvir/360))
+        let hor_new = hor - 2/(gridsize-1)/20*Math.sin(2*Math.PI*rhor/360)*Math.cos(2*Math.PI*rvir/360)/Math.abs(Math.cos(2*Math.PI*rvir/360))
+        if(vir_new<0.99 && vir_new > -0.99 && -hor_new<0.99 && -hor_new > -0.99)
+        {
+            a = (vir_new - grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][0])/(2/(gridsize-1))
+            b = (-hor_new - grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][1])/(2/(gridsize-1))
+            vir = vir_new
+            hor = hor_new
+            hei = grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][2] * (1-a)*(1-b) + grid.attributes.position[Math.ceil(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][2]*b*(1-a) + grid.attributes.position[Math.ceil(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir_new+1)/2*(gridsize-1))][2]*b*(a)+ grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir_new+1)/2*(gridsize-1))][2]*a*(1-b) + 4/(gridsize)
+        }
+    }
+  }
+  if (keysBeingPressed['a'] == true) {
+    if(fmode == 1){
+        vir = vir + 0.01*Math.cos(2*Math.PI*rvir/360)*Math.sin(2*Math.PI*rhor/360)
+        hor = hor + 0.01*Math.cos(2*Math.PI*rvir/360)*Math.cos(2*Math.PI*rhor/360)
+    }
+    else
+    {
+        let vir_new = vir + 2/(gridsize-1)/20*Math.sin(2*Math.PI*rhor/360)*Math.cos(2*Math.PI*rvir/360)/Math.abs(Math.cos(2*Math.PI*rvir/360))
+        let hor_new = hor + 2/(gridsize-1)/20*Math.cos(2*Math.PI*rhor/360)*Math.cos(2*Math.PI*rvir/360)/Math.abs(Math.cos(2*Math.PI*rvir/360))
+        if(vir_new<0.99 && vir_new > -0.99 && -hor_new<0.99 && -hor_new > -0.99)
+        {
+            a = (vir_new - grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][0])/(2/(gridsize-1))
+            b = (-hor_new - grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][1])/(2/(gridsize-1))
+            vir = vir_new
+            hor = hor_new
+            hei = grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][2] * (1-a)*(1-b) + grid.attributes.position[Math.ceil(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][2]*b*(1-a) + grid.attributes.position[Math.ceil(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir_new+1)/2*(gridsize-1))][2]*b*(a)+ grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir_new+1)/2*(gridsize-1))][2]*a*(1-b) + 4/(gridsize)
+        }
+    }
+  }
+  if (keysBeingPressed['d'] == true) {
+    if(fmode == 1){
+        vir = vir - 0.01*Math.cos(2*Math.PI*rvir/360)*Math.sin(2*Math.PI*rhor/360)
+        hor = hor - 0.01*Math.cos(2*Math.PI*rvir/360)*Math.cos(2*Math.PI*rhor/360)
+    }
+    else
+    {
+        let vir_new = vir - 2/(gridsize-1)/20*Math.sin(2*Math.PI*rhor/360)*Math.cos(2*Math.PI*rvir/360)/Math.abs(Math.cos(2*Math.PI*rvir/360))
+        let hor_new = hor - 2/(gridsize-1)/20*Math.cos(2*Math.PI*rhor/360)*Math.cos(2*Math.PI*rvir/360)/Math.abs(Math.cos(2*Math.PI*rvir/360))
+        if(vir_new<0.99 && vir_new > -0.99 && -hor_new<0.99 && -hor_new > -0.99)
+        {
+            a = (vir_new - grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][0])/(2/(gridsize-1))
+            b = (-hor_new - grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][1])/(2/(gridsize-1))
+            vir = vir_new
+            hor = hor_new
+            hei = grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][2] * (1-a)*(1-b) + grid.attributes.position[Math.ceil(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir_new+1)/2*(gridsize-1))][2]*b*(1-a) + grid.attributes.position[Math.ceil(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir_new+1)/2*(gridsize-1))][2]*b*(a)+ grid.attributes.position[Math.floor(((-hor_new+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir_new+1)/2*(gridsize-1))][2]*a*(1-b) + 4/(gridsize)
+        }
+    }
+  }
+  if (keysBeingPressed['ArrowUp'] == true) {
+    if (rvir < 270)
+        rvir = rvir + 1
+  }
+  if (keysBeingPressed['ArrowDown'] == true) {
+    if (rvir > -90)
+        rvir = rvir - 1
+  }
+  if (keysBeingPressed['ArrowLeft'] == true) {
+    rhor = rhor + 1
+  }
+  if (keysBeingPressed['ArrowRight'] == true) {
+    rhor = rhor - 1
+  }
+    window.m = m4mul(m4rotX(-Math.PI/2))
+    window.v = m4view([vir,hei,hor], [vir - (vir+1)*Math.cos(2*Math.PI*rvir/360)*Math.cos(2*Math.PI*rhor/360),hei+(vir+1)*Math.sin(2*Math.PI*rvir/360),hor+(vir+1)*Math.cos(2*Math.PI*rvir/360)*Math.sin(2*Math.PI*rhor/360)], [0,1,0])
+
+    draw()
+    requestAnimationFrame(timeStep)
+}
+
+
+/**
+ * Draw one frame and pass parameter to vertex shader and fragment shader
+ */
+ function draw() {
+    gl.clearColor(...IlliniBlue) // f(...[1,2,3]) means f(1,2,3)
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+    gl.useProgram(program)
+    gl.bindVertexArray(geom.vao)
+    gl.uniform3fv(gl.getUniformLocation(program, 'lightdir'), normalize([1,1,1]))
+    gl.uniform4fv(gl.getUniformLocation(program, 'color'), [0.5,0.5,0,1])
+    gl.uniform3fv(gl.getUniformLocation(program, 'lcolor'), [1,1,1])
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mul(v,m))
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+    var texcoordAttributeLocation = gl.getAttribLocation(program, "aTexCoord");
+    var texcoordBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(texcoordinate.flat()),gl.STATIC_DRAW);
+    gl.vertexAttribPointer(texcoordAttributeLocation, 2, gl.FLOAT, true, 0, 0);
+    gl.enableVertexAttribArray(texcoordAttributeLocation);
+    let bindPoint = gl.getUniformLocation(program, 'image')
+    gl.uniform1i(bindPoint, 0) // where `slot` is same it was in step 2 above
+    gl.drawElements(geom.mode, geom.count, geom.type, 0)
+    if(obj_flag == 1)
+    {
+        if(!obj_file.attributes.objcolor)
+        {
+            gl.bindVertexArray(geom2.vao)
+            gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mul(v,m))
+            gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+            gl.uniform4fv(gl.getUniformLocation(program, 'color'), [0.5,0.5,0,1])
+            gl.drawElements(geom2.mode, geom2.count, geom2.type, 0)
+        }
+        else
+        {
+            gl.useProgram(program2)
+            gl.bindVertexArray(geom2.vao)
+            gl.uniformMatrix4fv(gl.getUniformLocation(program2, 'mv'), false, m4mul(v,m))
+            gl.uniformMatrix4fv(gl.getUniformLocation(program2, 'p'), false, p)
+            gl.drawElements(geom2.mode, geom2.count, geom2.type, 0)
+        }
+    }
+}
+/** Compute the grid positions and triangles. Set gridsize x,y=-1.0 to x,y = 1.0, and use grid size to compute the position.*/
+function setgrid(){
+    grid.attributes.position = []
+    grid.triangles = []
+    for(let i = 0; i < gridsize; i++)
+        for(let j = 0; j < gridsize; j++)
+        {
+            grid.attributes.position.push([-1.0+j*2.0/(gridsize-1),-1.0+i*2.0/(gridsize-1),0])
+        }
+    for(let i = 0; i < gridsize-1; i++)
+        for(let j = 0; j < gridsize-1; j++)
+        {
+            grid.triangles.push([i*gridsize+j,i*gridsize+j+1,i*gridsize+j+gridsize])
+            grid.triangles.push([i*gridsize+j+1,i*gridsize+j+gridsize+1,i*gridsize+j+gridsize])
+        }
+}
+
+/**choose a point p and n which are random generate and point from grid to do faulting if the dot(sub(b,p),n) is >=0 then let z increase, else let z decrease.
+ * After finish faulting use max_z, min_z, max_x, min_x to do vertical separation which the highest to lowest point are 1/3 times as large as the horizontal separation of points
+*/
+function faulting() {
+    for(let i = 0; i < Fractures; i++)
+    {
+        //pick random point
+        let x = Math.random()*2-1
+        let y = Math.random()*2-1
+        let p = [x, y]
+        let theta =  Math.random()*2
+        let n = [Math.cos(Math.PI*theta),Math.sin(Math.PI*theta),0]
+        for(let j = 0; j < gridsize*gridsize; j++)
+        {
+            let b = [grid.attributes.position[j][0],grid.attributes.position[j][1]]
+            if(dot(sub(b,p),n) >= 0.0)
+            {
+                grid.attributes.position[j][2] = grid.attributes.position[j][2] + 0.01
+            }
+            else
+            {
+                grid.attributes.position[j][2] = grid.attributes.position[j][2] - 0.01
+            }
+        }
+
+    }
+    if(Fractures > 0)
+    {
+        let min_x = 2.0, max_x = -2.0 
+        window.min_z = 4.0 
+        window.max_z = -4.0
+        for(let j = 0; j < gridsize*gridsize; j++)
+        {
+            if(grid.attributes.position[j][0]>max_x)
+                max_x = grid.attributes.position[j][0]
+            if(grid.attributes.position[j][0]<min_x)
+                min_x = grid.attributes.position[j][0]
+            if(grid.attributes.position[j][2]>max_z)
+                max_z = grid.attributes.position[j][2]
+            if(grid.attributes.position[j][2]<min_z)
+                min_z = grid.attributes.position[j][2]
+        }
+        let h = (max_x-min_x) * 1/3
+        if(h != 0.0)
+        {
+            for(let j = 0; j < gridsize*gridsize; j++)
+            {
+                grid.attributes.position[j][2] = (grid.attributes.position[j][2] - min_z) / (max_z-min_z)*h - h/2
+            }
+        }
+        for(let j = 0; j < gridsize*gridsize; j++)
+        {
+            if(grid.attributes.position[j][2]>max_z)
+                max_z = grid.attributes.position[j][2]
+            if(grid.attributes.position[j][2]<min_z)
+                min_z = grid.attributes.position[j][2]
+        }
+    }
+}
+/**parse the data from objfile to be the data strature that can be set up to geom*/
+function ParseData() {
+    let msg = new String(Data)
+    let arr = msg.split('\n')
+    window.count = 0
+    window.pc = 0
+    window.t = 0
+    for(let i = 0; i < arr.length; i++)
+    {   
+        count = count+1
+        let datarow = arr[i].trim().split(/\s+/)
+        if(datarow[0] == 'v')
+        {
+            obj_file.attributes.position.push([parseFloat(datarow[1]),parseFloat(datarow[2]),parseFloat(datarow[3])])
+            if(datarow.length>4)
+            {   
+                if(!obj_file.attributes.objcolor)
+                    obj_file.attributes.objcolor = []
+                obj_file.attributes.objcolor.push([parseFloat(datarow[4]),parseFloat(datarow[5]),parseFloat(datarow[6])])
+                window.pc = pc+1
+            }
+        }
+        else if(datarow[0] == 'f')
+        {
+            for(let j = 2; j< datarow.length-1;j++)
+            {
+                obj_file.triangles.push([parseFloat(datarow[1])-1,parseFloat(datarow[j])-1,parseFloat(datarow[j+1])-1])
+                window.t = t+1
+            }
+        }
+        else
+        {
+            console.log(arr[i])
+        }
+    }
+    console.log(arr.length,pc,t)
+    obj_file.attributes.normal = []
+    for(let i=0; i<obj_file.attributes.position.length; i+=1) {
+        obj_file.attributes.normal.push([0,0,0])
+    }
+    for(let i=0; i<obj_file.triangles.length; i+=1) {
+        let tri = obj_file.triangles[i]
+        let p0 = obj_file.attributes.position[tri[0]]
+        let p1 = obj_file.attributes.position[tri[1]]
+        let p2 = obj_file.attributes.position[tri[2]]
+        let e1 = sub(p1,p0)
+        let e2 = sub(p2,p0)
+        let n = cross(e1,e2)
+        obj_file.attributes.normal[tri[0]] = add(obj_file.attributes.normal[tri[0]], n)
+        obj_file.attributes.normal[tri[1]] = add(obj_file.attributes.normal[tri[1]], n)
+        obj_file.attributes.normal[tri[2]] = add(obj_file.attributes.normal[tri[2]], n)
+    }
+    for(let i=0; i<grid.attributes.position.length; i+=1) {
+        obj_file.attributes.normal[i] = normalize(obj_file.attributes.normal[i] )
+    }
+}
+/**
+ * set the variable , Generate geometry, render the scene
+ */
+/** Compile, link, set up geometry fetch the texture data and objfile data and initialize variable*/
+async function setup(event) {
+    window.gl = document.querySelector('canvas').getContext('webgl2',
+        // optional configuration object: see https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/getContext
+        {antialias: false, depth:true, preserveDrawingBuffer:true}
+    )
+    let vs = document.querySelector('#vert').textContent.trim()
+    let fs = document.querySelector('#frag').textContent.trim()
+    let vs2 = document.querySelector('#vert2').textContent.trim()
+    let fs2 = document.querySelector('#frag2').textContent.trim()
+    window.gridsize = 51
+    window.Fractures = 51
+    window.texcoordinate = []
+    for(let i = 0; i < gridsize; i++)
+        for(let j = 0; j < gridsize; j++)
+        {
+            texcoordinate.push([-1.0+j*2.0/(gridsize-1),-1.0+i*2.0/(gridsize-1)])
+        }
+
+    window.program = compileAndLinkGLSL(vs,fs)
+    window.program2 = compileAndLinkGLSL(vs2,fs2)
+    window.image = new Image();
+    image.src = "farm.jpg"
+    image.crossOrigin = 'anonymous';
+    image.addEventListener('load', function() {
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    gl.generateMipmap(gl.TEXTURE_2D);
+  });
+    gl.enable(gl.DEPTH_TEST)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    grid = empty_terrian
+    window.hor = 0.1
+    window.vir = 3.0
+    window.hei = 0.5
+    window.rhor = 0
+    window.rvir = 0
+    window.fmode = 1
+    window.obj_flag = 0
+    window.keysBeingPressed = {}
+    window.filename = window.location.hash.substr(1)
+    if(filename == '')
+        window.response = await fetch("./example.obj")
+    else
+        window.response = await fetch("https://cs418.cs.illinois.edu/website/files/"+filename)
+    console.log(response.ok)
+    if(response.ok == true)
+    {
+        window.Data = await response.text();
+        if (Data.length > 0)
+        {
+            ParseData()
+        }
+        obj_flag = 1
+    }
+    if(obj_flag == 1)
+    {
+        if(obj_file.attributes.objcolor)
+            window.geom2 = setupGeomery(program2,obj_file)
+        else
+            window.geom2 = setupGeomery(program,obj_file)
+    }
+    setgrid()
+    faulting()
+    addNormals()
+    window.a=0, window.b=0, window.c=0, window.d=0
+    window.geom = setupGeomery(program,grid)
+    fillScreen()
+    window.addEventListener('resize', fillScreen)
+    requestAnimationFrame(timeStep)
+}
+
+window.addEventListener('load', setup)
+window.addEventListener('resize', fillScreen)
+window.addEventListener('keydown', event => keysBeingPressed[event.key] = true)
+window.addEventListener('keyup', event => keysBeingPressed[event.key] = false)
+/**the key event that change the parameter which can make camera forward down left right and rotate camera*/
+document.addEventListener('keydown', function(event) {
+  console.log(event.key,keysBeingPressed[event.key])
+  if (event.code == 'KeyG') {
+    fmode = fmode * -1
+    if(fmode == 1)
+    {
+        window.hor = 0.1
+        window.vir = 3.0
+        window.hei = 0.5
+        window.rhor = 0
+        window.rvir = 0
+    }
+    else
+    {
+        window.hor = 0.1
+        window.vir = 0.5
+        let aa = (vir - grid.attributes.position[Math.floor(((-hor+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir+1)/2*(gridsize-1))][0])/(2/(gridsize-1))
+        let bb = (-hor - grid.attributes.position[Math.floor(((-hor+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir+1)/2*(gridsize-1))][1])/(2/(gridsize-1))
+        window.hei = grid.attributes.position[Math.floor(((-hor+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir+1)/2*(gridsize-1))][2] * (1-aa)*(1-bb) + grid.attributes.position[Math.ceil(((-hor+1))/2*(gridsize-1))*(gridsize)+Math.floor((vir+1)/2*(gridsize-1))][2]*bb*(1-aa) + grid.attributes.position[Math.ceil(((-hor+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir+1)/2*(gridsize-1))][2]*bb*(aa)+ grid.attributes.position[Math.floor(((-hor+1))/2*(gridsize-1))*(gridsize)+Math.ceil((vir+1)/2*(gridsize-1))][2]*aa*(1-bb) +4/(gridsize)
+        window.rhor = 0
+        window.rvir = 0
+    }
+  }
+});
+</script>
+
+
+
+<!-- DO NOT MODIFY anything below this line -->
+<style>
+    body { margin: 0; border: none; padding: 0; display: flex; }
+    .controls {
+        width: min(50%, 20em); padding: 1em;
+        flex: 0 0 min(50%, 20em);
+    }
+    .controls label { display: block; }
+    .display {
+        flex-grow: 1; height: 100vh;
+        line-height: 0rem;
+    }
+</style>
+</head>
+<body>
+    <div class="display"><canvas width="500" height="500"></canvas>
+    
+</body>
+</html>
